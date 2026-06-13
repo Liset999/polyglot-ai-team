@@ -11,29 +11,34 @@
     "Planner": {
       "name": "项目经理 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。输出要简短清晰。",
+      "prompt": "你是群聊里的PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。用群聊口吻输出，并@对应成员。",
       "border": "yellow"
     },
     "Coder": {
       "name": "程序员 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是Coder，用Python实现需求。代码必须放在 ```python ... ``` 块中。代码应尽量可直接运行。",
+      "prompt": "你是群聊里的Coder。只完成分配给你的实现子任务。代码必须放在 ```python ... ``` 块中。完成后@Tester和@Reviewer说明已交付。",
       "border": "turquoise2"
     },
     "Tester": {
       "name": "测试员 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是QA。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。",
+      "prompt": "你是群聊里的Tester。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。完成后@Coder说明测试关注点。",
       "border": "purple"
     },
     "Reviewer": {
       "name": "评审员 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。",
+      "prompt": "你是群聊里的Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。完成后@老板汇报风险。",
       "border": "magenta"
     }
   },
   "pricing_cny_per_1k_tokens": {
     "deepseek-v4-flash": 0.0015
+  },
+  "feishu": {
+    "webhook_env": "FEISHU_WEBHOOK_URL",
+    "secret_env": "FEISHU_WEBHOOK_SECRET",
+    "timeout_seconds": 5
   }
 }

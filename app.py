@@ -1,4 +1,7 @@
 import argparse
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -8,6 +11,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, Queue
+from threading import Event, Thread
 
 import httpx
 from openai import OpenAI
@@ -24,6 +29,7 @@ except AttributeError:
     pass
 
 console = Console(legacy_windows=False)
+FEISHU_NOTIFIER = None
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
 HISTORY_PATH = ROOT / "history.json"
@@ -44,30 +50,35 @@ DEFAULT_CONFIG = {
         "Planner": {
             "name": "项目经理 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。输出要简短清晰。",
+            "prompt": "你是群聊里的PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。用群聊口吻输出，并@对应成员。",
             "border": "yellow",
         },
         "Coder": {
             "name": "程序员 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是Coder，用Python实现需求。代码必须放在 ```python ... ``` 块中。代码应尽量可直接运行。",
+            "prompt": "你是群聊里的Coder。只完成分配给你的实现子任务。代码必须放在 ```python ... ``` 块中。完成后@Tester和@Reviewer说明已交付。",
             "border": "turquoise2",
         },
         "Tester": {
             "name": "测试员 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是QA。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。",
+            "prompt": "你是群聊里的Tester。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。完成后@Coder说明测试关注点。",
             "border": "purple",
         },
         "Reviewer": {
             "name": "评审员 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。",
+            "prompt": "你是群聊里的Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。完成后@老板汇报风险。",
             "border": "magenta",
         },
     },
     "pricing_cny_per_1k_tokens": {
         "deepseek-v4-flash": 0.0015,
+    },
+    "feishu": {
+        "webhook_env": "FEISHU_WEBHOOK_URL",
+        "secret_env": "FEISHU_WEBHOOK_SECRET",
+        "timeout_seconds": 5,
     },
 }
 
@@ -113,6 +124,50 @@ def build_client(config):
         timeout=timeout,
         http_client=httpx.Client(timeout=timeout, trust_env=False),
     )
+
+
+def build_feishu_notifier(config, disabled=False):
+    if disabled:
+        return None
+    feishu_config = config.get("feishu", {})
+    webhook = os.getenv(feishu_config.get("webhook_env", "FEISHU_WEBHOOK_URL"))
+    if not webhook:
+        return None
+    secret = os.getenv(feishu_config.get("secret_env", "FEISHU_WEBHOOK_SECRET"))
+    timeout = feishu_config.get("timeout_seconds", 5)
+    return FeishuNotifier(webhook, secret=secret, timeout=timeout)
+
+
+class FeishuNotifier:
+    def __init__(self, webhook, secret=None, timeout=5):
+        self.webhook = webhook
+        self.secret = secret
+        self.timeout = timeout
+        self.client = httpx.Client(timeout=timeout, trust_env=False)
+
+    def sign_payload(self, payload):
+        if not self.secret:
+            return payload
+        timestamp = str(int(time.time()))
+        string_to_sign = f"{timestamp}\n{self.secret}"
+        digest = hmac.new(string_to_sign.encode("utf-8"), digestmod=hashlib.sha256).digest()
+        payload["timestamp"] = timestamp
+        payload["sign"] = base64.b64encode(digest).decode("utf-8")
+        return payload
+
+    def send_text(self, title, body, mention=None):
+        mention_text = f" @{mention}" if mention else ""
+        text = f"{title}{mention_text}\n{body}"
+        if len(text) > 3500:
+            text = text[:3500] + "\n...[消息过长，已截断]"
+        payload = {
+            "msg_type": "text",
+            "content": {"text": text},
+        }
+        try:
+            self.client.post(self.webhook, json=self.sign_payload(payload))
+        except Exception as exc:
+            console.print(f"[dim red]飞书同步失败: {format_api_error(exc)}[/]")
 
 
 def get_api_key(config):
@@ -206,9 +261,14 @@ def print_banner(task, mode):
     console.print(f"[bold cyan]{line}[/]\n")
 
 
-def render_message(title, body, border_style="cyan", subtitle=None):
-    panel_title = title if subtitle is None else f"{title} [dim]{subtitle}[/]"
+def render_message(title, body, border_style="cyan", subtitle=None, mention=None):
+    mention_text = f" @{mention}" if mention else ""
+    panel_title = f"[{now_stamp()}] {title}{mention_text}"
+    if subtitle is not None:
+        panel_title = f"{panel_title} [dim]{subtitle}[/]"
     console.print(Panel(Text(body), title=panel_title, border_style=border_style))
+    if FEISHU_NOTIFIER:
+        FEISHU_NOTIFIER.send_text(f"[{now_stamp()}] {title}", body, mention=mention)
 
 
 def fake_typing(label, delay):
@@ -225,24 +285,80 @@ def print_parallel_launch(role_keys, config):
 
 
 def print_task_assignments(assignments, config):
-    console.print("\n[bold cyan]⇢ 子任务分发：大任务已拆分，开始并行执行...[/]")
+    console.print("\n[bold cyan]⇢ 群聊分工：大任务已拆分，成员开始并行执行...[/]")
     for role_key, subtask in assignments.items():
         role = config["roles"][role_key]
-        console.print(f"[dim]● {role['name']} ← {subtask}[/]")
+        console.print(f"[dim][{now_stamp()}] 项目经理 @{role_key}: {subtask}[/]")
+
+
+def start_live_input_listener(enabled=True):
+    queue = Queue()
+    stop_event = Event()
+    if not enabled:
+        return queue, stop_event, None
+
+    def listen():
+        while not stop_event.is_set():
+            try:
+                line = input()
+            except EOFError:
+                break
+            line = line.strip()
+            if line:
+                queue.put(line)
+
+    thread = Thread(target=listen, daemon=True)
+    thread.start()
+    return queue, stop_event, thread
+
+
+def drain_live_messages(queue, shared_history, log_artifact):
+    drained = []
+    while True:
+        try:
+            message = queue.get_nowait()
+        except Empty:
+            break
+        drained.append(message)
+        shared_history.append({"role": "user", "content": f"[老板群聊插话] {message}"})
+        append_log(
+            log_artifact,
+            "Boss",
+            "老板",
+            "live-input",
+            message,
+            0,
+            0.0,
+            0,
+            extra={"live": True},
+        )
+        render_message("老板 (中途插话)", message, "bright_blue")
+    return drained
+
+
+def mentioned_roles(message):
+    normalized = message.lower()
+    role_aliases = {
+        "Coder": ["@coder", "@程序员", "@开发"],
+        "Tester": ["@tester", "@qa", "@测试员", "@测试"],
+        "Reviewer": ["@reviewer", "@评审员", "@评审"],
+        "Planner": ["@planner", "@pm", "@项目经理"],
+    }
+    return [role_key for role_key, aliases in role_aliases.items() if any(alias in normalized for alias in aliases)]
 
 
 def offline_reply(role_key, task, shared_history, fix_round):
     if role_key == "Planner":
         content = (
-            f"拆解结果：Coder 负责实现「{task}」的可运行 Python 构件；"
-            "Tester 负责测试边界和验收标准；Reviewer 负责风险评审和集成建议。"
+            f"@Coder 你负责实现「{task}」的可运行 Python 构件；"
+            "@Tester 你负责测试边界和验收标准；@Reviewer 你负责风险评审和集成建议。大家并行开工。"
         )
         return content, estimate_tokens(content)
 
     if role_key == "Coder":
         code = offline_code_for_task(task, fix_round)
         content = (
-            "收到，下面给出可直接运行的 Python 实现，已避免阻塞式输入。\n\n"
+            "@Tester @Reviewer 我这边实现先交付，下面是可直接运行的 Python 代码。\n\n"
             f"```python\n{code}```\n"
             f"📎 构件将自动导出至: {AUTO_RUN_PATH.as_posix()}"
         )
@@ -250,13 +366,13 @@ def offline_reply(role_key, task, shared_history, fix_round):
 
     if role_key == "Tester":
         content = (
-        "并行测试清单：1) 身高或体重为 0/负数时应拒绝；2) BMI 分段边界 18.5、24、28 要覆盖；"
+        "@Coder 我先给测试关注点：1) 身高或体重为 0/负数时应拒绝；2) BMI 分段边界 18.5、24、28 要覆盖；"
         "3) 非数字输入不能崩溃；4) 程序应有可直接运行入口，便于系统沙箱验证。"
         )
         return content, estimate_tokens(content)
 
     content = (
-        "并行评审结论：核心风险是交互式 input 在无人值守沙箱中会触发 EOF；"
+        "@老板 我先报风险：核心风险是交互式 input 在无人值守沙箱中会触发 EOF；"
         "建议提供 main 入口、纯函数 calculate_bmi、明确单位，并把测试数据写入验收说明。"
     )
     return content, estimate_tokens(content)
@@ -400,15 +516,15 @@ def build_subtask_assignments(task, planner_reply):
     return {
         "Coder": (
             f"子任务A - 实现构件：根据老板任务「{task}」写出可直接运行的 Python 代码。"
-            "必须把完整代码放在 ```python ... ``` 代码块中，优先提供纯函数和 main 入口。"
+            "必须把完整代码放在 ```python ... ``` 代码块中，优先提供纯函数和 main 入口。完成后@Tester @Reviewer。"
         ),
         "Tester": (
             f"子任务B - 测试设计：针对「{task}」列出测试用例、边界条件、错误输入和验收标准。"
-            "不要写实现代码，专注测试矩阵。"
+            "不要写实现代码，专注测试矩阵。完成后@Coder。"
         ),
         "Reviewer": (
             f"子任务C - 评审集成：根据「{task}」和PM拆解「{planner_reply}」指出风险、"
-            "无人值守运行注意事项、最终交付建议。不要写完整实现代码。"
+            "无人值守运行注意事项、最终交付建议。不要写完整实现代码。完成后@老板。"
         ),
     }
 
@@ -441,7 +557,13 @@ def render_role_result(result, shared_history, log_artifact, label=None):
     body = result["reply"]
     if result.get("assigned_task") and result["role_key"] != "Planner":
         body = f"[分配子任务]\n{result['assigned_task']}\n\n[执行结果]\n{result['reply']}"
-    render_message(display_name, body, result["border"], subtitle)
+    mention_map = {
+        "Planner": "Coder @Tester @Reviewer",
+        "Coder": "Tester @Reviewer",
+        "Tester": "Coder",
+        "Reviewer": "老板",
+    }
+    render_message(display_name, body, result["border"], subtitle, mention=mention_map.get(role_key))
     shared_history.append({"role": "assistant", "content": f"[{role_key}] {result['reply']}"})
     append_log(
         log_artifact,
@@ -496,7 +618,7 @@ def run_coder_once(task, shared_history, config, client, offline, log_artifact, 
         )
         border = "red"
 
-    render_message("系统沙箱 (Harness 运行时)", body, border, f"| {artifact_path.as_posix()}")
+    render_message("系统沙箱 (Harness 运行时)", body, border, f"| {artifact_path.as_posix()}", mention="Coder" if not result["ok"] else "Tester")
     append_log(
         log_artifact,
         "Harness",
@@ -555,7 +677,7 @@ def process_coder_result(result, task, shared_history, config, client, offline, 
         )
         border = "red"
 
-    render_message("系统沙箱 (Harness 运行时)", body, border, f"| {artifact_path.as_posix()}")
+    render_message("系统沙箱 (Harness 运行时)", body, border, f"| {artifact_path.as_posix()}", mention="Coder" if not result["ok"] else "Tester")
     append_log(
         log_artifact,
         "Harness",
@@ -599,8 +721,26 @@ def run_role(role_key, task, shared_history, config, client, offline, log_artifa
     return tokens, cost
 
 
-def run_team_chat(task, force_offline=False, no_run=False):
+def run_live_followups(messages, shared_history, config, client, offline, log_artifact, no_run):
+    for message in messages:
+        for role_key in mentioned_roles(message):
+            followup_task = f"老板在群聊中途追加给你的变更：{message}。请只处理这条 @ 指令，并结合已有上下文回复。"
+            role = config["roles"][role_key]
+            render_message("调度器", f"收到老板插话，转发给 @{role_key}: {message}", "cyan", mention=role_key)
+            if role_key == "Coder" and not no_run:
+                result = request_role(role_key, followup_task, list(shared_history), config, offline)
+                ok, feedback = process_coder_result(result, followup_task, shared_history, config, client, offline, log_artifact)
+                if not ok and feedback != "API_FAILURE":
+                    run_coder_once(followup_task, shared_history, config, client, offline, log_artifact, fix_round=1)
+            else:
+                result = request_role(role_key, followup_task, list(shared_history), config, offline)
+                render_role_result(result, shared_history, log_artifact)
+
+
+def run_team_chat(task, force_offline=False, no_run=False, no_feishu=False):
+    global FEISHU_NOTIFIER
     config = load_config()
+    FEISHU_NOTIFIER = build_feishu_notifier(config, disabled=no_feishu)
     offline = not api_ready(config, force_offline)
     mode = "Offline Split+Parallel" if offline else "Split+Parallel"
     client = None if offline else build_client(config)
@@ -628,10 +768,14 @@ def run_team_chat(task, force_offline=False, no_run=False):
     }
 
     print_banner(task, mode)
-    render_message("老板 (用户输入)", f"任务: {task}", "bright_blue")
+    render_message("老板 (用户输入)", f"@项目经理 任务: {task}", "bright_blue", mention="项目经理")
+    live_queue, live_stop, _ = start_live_input_listener(enabled=not force_offline)
+    console.print("[dim]运行中可直接输入群聊指令，例如：@Coder 改成命令行参数版，回车发送。[/]")
 
     planner_result = request_role("Planner", task, list(shared_history), config, offline)
     render_role_result(planner_result, shared_history, log_artifact)
+    live_messages = drain_live_messages(live_queue, shared_history, log_artifact)
+    run_live_followups(live_messages, shared_history, config, client, offline, log_artifact, no_run)
     assignments = build_subtask_assignments(task, planner_result["reply"])
     worker_keys = list(assignments.keys())
     print_task_assignments(assignments, config)
@@ -644,6 +788,8 @@ def run_team_chat(task, force_offline=False, no_run=False):
         }
         coder_done = False
         for future in as_completed(futures):
+            live_messages = drain_live_messages(live_queue, shared_history, log_artifact)
+            run_live_followups(live_messages, shared_history, config, client, offline, log_artifact, no_run)
             result = future.result()
             if result["role_key"] == "Coder":
                 coder_done = True
@@ -654,6 +800,8 @@ def run_team_chat(task, force_offline=False, no_run=False):
                     max_fix_rounds = int(config.get("max_fix_rounds", 2))
                     fix_round = 1
                     while not ok and _ != "API_FAILURE" and fix_round <= max_fix_rounds:
+                        live_messages = drain_live_messages(live_queue, shared_history, log_artifact)
+                        run_live_followups(live_messages, shared_history, config, client, offline, log_artifact, no_run)
                         ok, _ = run_coder_once(
                             task,
                             shared_history,
@@ -666,9 +814,15 @@ def run_team_chat(task, force_offline=False, no_run=False):
                         fix_round += 1
                 continue
             render_role_result(result, shared_history, log_artifact)
+            live_messages = drain_live_messages(live_queue, shared_history, log_artifact)
+            run_live_followups(live_messages, shared_history, config, client, offline, log_artifact, no_run)
 
     if not coder_done:
         raise RuntimeError("Coder did not return a result")
+
+    live_messages = drain_live_messages(live_queue, shared_history, log_artifact)
+    run_live_followups(live_messages, shared_history, config, client, offline, log_artifact, no_run)
+    live_stop.set()
 
     total_tokens = sum(item.get("tokens", 0) for item in log_artifact["messages"])
     total_cost = sum(item.get("cost_cny", 0.0) for item in log_artifact["messages"])
@@ -689,10 +843,11 @@ def parse_args():
     parser.add_argument("task", nargs="*", help="老板任务，例如：写个BMI计算器")
     parser.add_argument("--offline", action="store_true", help="强制使用本地 mock，不调用 API")
     parser.add_argument("--no-run", action="store_true", help="只展示群聊，不执行 Coder 产物")
+    parser.add_argument("--no-feishu", action="store_true", help="本次运行不向飞书群机器人同步消息")
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
     task = " ".join(args.task).strip() or "写一段获取当前系统内存使用率的Python代码。"
-    run_team_chat(task, force_offline=args.offline, no_run=args.no_run)
+    run_team_chat(task, force_offline=args.offline, no_run=args.no_run, no_feishu=args.no_feishu)
