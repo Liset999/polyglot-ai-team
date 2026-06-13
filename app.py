@@ -31,7 +31,7 @@ AUTO_RUN_PATH = OUTPUT_DIR / "auto_run.py"
 
 DEFAULT_CONFIG = {
     "base_url": "https://your-gateway.example.com/v1",
-    "api_key_env": "API_KEY",
+    "api_key_env": "DEEPSEEK_API_KEY",
     "temperature": 0.3,
     "request_timeout_seconds": 30,
     "runtime_timeout_seconds": 5,
@@ -40,28 +40,26 @@ DEFAULT_CONFIG = {
     "offline_mode": "auto",
     "roles": {
         "Planner": {
-            "name": "项目经理 (Kimi)",
-            "model": "kimi-latest",
+            "name": "项目经理 (DeepSeek)",
+            "model": "deepseek-v4-flash",
             "prompt": "你是PM，拆解需求。请用2句话以内概括，并明确指定@Coder执行。",
             "border": "yellow",
         },
         "Coder": {
             "name": "程序员 (DeepSeek)",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "prompt": "你是Coder，用Python实现需求。代码必须放在 ```python ... ``` 块中。代码应尽量可直接运行。",
             "border": "turquoise2",
         },
         "Tester": {
-            "name": "测试员 (Qwen)",
-            "model": "qwen-plus",
+            "name": "测试员 (DeepSeek)",
+            "model": "deepseek-v4-flash",
             "prompt": "你是QA。检查代码逻辑，输出 ✓ 完美 或 ✗ 缺陷，并简述原因。",
             "border": "purple",
         },
     },
     "pricing_cny_per_1k_tokens": {
-        "kimi-latest": 0.0020,
-        "deepseek-chat": 0.0015,
-        "qwen-plus": 0.0018,
+        "deepseek-v4-flash": 0.0015,
     },
 }
 
@@ -90,7 +88,7 @@ def api_ready(config, forced_offline):
     if config.get("offline_mode") == "always":
         return False
 
-    api_key = os.getenv(config.get("api_key_env", "API_KEY")) or os.getenv("OPENAI_API_KEY")
+    api_key = get_api_key(config)
     base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL") or config.get("base_url", "")
     if not api_key:
         return False
@@ -98,13 +96,38 @@ def api_ready(config, forced_offline):
 
 
 def build_client(config):
-    api_key = os.getenv(config.get("api_key_env", "API_KEY")) or os.getenv("OPENAI_API_KEY")
+    api_key = get_api_key(config)
     base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL") or config.get("base_url")
     return OpenAI(
         api_key=api_key,
         base_url=base_url,
         timeout=config.get("request_timeout_seconds", 30),
     )
+
+
+def get_api_key(config):
+    names = [
+        config.get("api_key_env", "API_KEY"),
+        "DEEPSEEK_API_KEY",
+        "API_KEY",
+        "OPENAI_API_KEY",
+    ]
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
+
+
+def format_api_error(exc):
+    parts = [f"{type(exc).__name__}: {exc}"]
+    cause = getattr(exc, "__cause__", None)
+    context = getattr(exc, "__context__", None)
+    if cause:
+        parts.append(f"cause={type(cause).__name__}: {cause}")
+    if context and context is not cause:
+        parts.append(f"context={type(context).__name__}: {context}")
+    return " | ".join(parts)
 
 
 def now_stamp():
@@ -322,7 +345,7 @@ def ask_ai(role_key, task, shared_history, config, client, offline, fix_round=0)
         tokens = getattr(usage, "total_tokens", None) or estimate_tokens(content)
         return content, tokens
     except Exception as exc:
-        content = f"🔴 [集群链路故障]: {exc}"
+        content = f"🔴 [集群链路故障]: {format_api_error(exc)}"
         return content, 0
 
 
@@ -359,6 +382,8 @@ def run_coder_once(task, shared_history, config, client, offline, log_artifact, 
     append_log(log_artifact, role_key, label, role["model"], reply, tokens, cost, duration)
 
     code = extract_python_code(reply)
+    if "🔴 [集群链路故障]" in reply:
+        return False, "API_FAILURE"
     if not code:
         feedback = "[系统反馈] Coder 未输出 Python Markdown 代码块，无法生成构件。"
         shared_history.append({"role": "user", "content": feedback})
@@ -464,7 +489,7 @@ def run_team_chat(task, force_offline=False, no_run=False):
         ok, _ = run_coder_once(task, shared_history, config, client, offline, log_artifact)
         max_fix_rounds = int(config.get("max_fix_rounds", 2))
         fix_round = 1
-        while not ok and fix_round <= max_fix_rounds:
+        while not ok and _ != "API_FAILURE" and fix_round <= max_fix_rounds:
             ok, _ = run_coder_once(
                 task,
                 shared_history,

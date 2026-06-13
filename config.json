@@ -1,6 +1,6 @@
 {
   "base_url": "https://api.deepseek.com",
-  "api_key_env": "API_KEY",
+  "api_key_env": "DEEPSEEK_API_KEY",
   "temperature": 0.3,
   "request_timeout_seconds": 30,
   "runtime_timeout_seconds": 5,
@@ -9,7 +9,7 @@
   "offline_mode": "auto",
   "roles": {
     "Planner": {
-      "name": "项目经理 (Kimi)",
+      "name": "项目经理 (DeepSeek)",
       "model": "deepseek-v4-flash",
       "prompt": "你是PM，拆解需求。请用2句话以内概括，并明确指定@Coder执行。",
       "border": "yellow"
@@ -21,7 +21,7 @@
       "border": "turquoise2"
     },
     "Tester": {
-      "name": "测试员 (Qwen)",
+      "name": "测试员 (DeepSeek)",
       "model": "deepseek-v4-flash",
       "prompt": "你是QA。检查代码逻辑，输出 ✓ 完美 或 ✗ 缺陷，并简述原因。",
       "border": "purple"
