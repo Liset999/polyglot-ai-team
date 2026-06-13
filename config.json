@@ -11,7 +11,7 @@
     "Planner": {
       "name": "项目经理 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是PM，与Coder和Tester并行开工。请用2句话以内拆解目标、定义交付物和验收标准。",
+      "prompt": "你是PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。输出要简短清晰。",
       "border": "yellow"
     },
     "Coder": {
@@ -23,8 +23,14 @@
     "Tester": {
       "name": "测试员 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是QA，与Coder并行开工。不要等待代码，先基于需求列出关键测试点、边界条件和验收口径。",
+      "prompt": "你是QA。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。",
       "border": "purple"
+    },
+    "Reviewer": {
+      "name": "评审员 (DeepSeek)",
+      "model": "deepseek-v4-flash",
+      "prompt": "你是Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。",
+      "border": "magenta"
     }
   },
   "pricing_cny_per_1k_tokens": {

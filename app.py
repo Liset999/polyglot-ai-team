@@ -44,7 +44,7 @@ DEFAULT_CONFIG = {
         "Planner": {
             "name": "项目经理 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是PM，与Coder和Tester并行开工。请用2句话以内拆解目标、定义交付物和验收标准。",
+            "prompt": "你是PM。请把用户的大任务拆成可并行执行的小任务，分别适合交给Coder、Tester、Reviewer。输出要简短清晰。",
             "border": "yellow",
         },
         "Coder": {
@@ -56,8 +56,14 @@ DEFAULT_CONFIG = {
         "Tester": {
             "name": "测试员 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是QA，与Coder并行开工。不要等待代码，先基于需求列出关键测试点、边界条件和验收口径。",
+            "prompt": "你是QA。只完成分配给你的测试子任务：列出关键测试用例、边界条件、验收口径。",
             "border": "purple",
+        },
+        "Reviewer": {
+            "name": "评审员 (DeepSeek)",
+            "model": "deepseek-v4-flash",
+            "prompt": "你是Reviewer。只完成分配给你的评审子任务：指出风险、集成注意事项、可交付改进建议。",
+            "border": "magenta",
         },
     },
     "pricing_cny_per_1k_tokens": {
@@ -218,11 +224,18 @@ def print_parallel_launch(role_keys, config):
         console.print(f"[dim]● {role['name']} 已启动[/]")
 
 
+def print_task_assignments(assignments, config):
+    console.print("\n[bold cyan]⇢ 子任务分发：大任务已拆分，开始并行执行...[/]")
+    for role_key, subtask in assignments.items():
+        role = config["roles"][role_key]
+        console.print(f"[dim]● {role['name']} ← {subtask}[/]")
+
+
 def offline_reply(role_key, task, shared_history, fix_round):
     if role_key == "Planner":
         content = (
-            f"任务拆解：先生成一个可直接运行的 Python 构件，再由系统沙箱执行并回填结果。"
-            f"@Coder 立即实现「{task}」的核心逻辑，避免交互式卡死。"
+            f"拆解结果：Coder 负责实现「{task}」的可运行 Python 构件；"
+            "Tester 负责测试边界和验收标准；Reviewer 负责风险评审和集成建议。"
         )
         return content, estimate_tokens(content)
 
@@ -235,9 +248,16 @@ def offline_reply(role_key, task, shared_history, fix_round):
         )
         return content, estimate_tokens(content)
 
-    content = (
+    if role_key == "Tester":
+        content = (
         "并行测试清单：1) 身高或体重为 0/负数时应拒绝；2) BMI 分段边界 18.5、24、28 要覆盖；"
         "3) 非数字输入不能崩溃；4) 程序应有可直接运行入口，便于系统沙箱验证。"
+        )
+        return content, estimate_tokens(content)
+
+    content = (
+        "并行评审结论：核心风险是交互式 input 在无人值守沙箱中会触发 EOF；"
+        "建议提供 main 入口、纯函数 calculate_bmi、明确单位，并把测试数据写入验收说明。"
     )
     return content, estimate_tokens(content)
 
@@ -376,6 +396,23 @@ def append_log(log_artifact, role_key, name, model, content, tokens, cost, durat
     log_artifact["messages"].append(item)
 
 
+def build_subtask_assignments(task, planner_reply):
+    return {
+        "Coder": (
+            f"子任务A - 实现构件：根据老板任务「{task}」写出可直接运行的 Python 代码。"
+            "必须把完整代码放在 ```python ... ``` 代码块中，优先提供纯函数和 main 入口。"
+        ),
+        "Tester": (
+            f"子任务B - 测试设计：针对「{task}」列出测试用例、边界条件、错误输入和验收标准。"
+            "不要写实现代码，专注测试矩阵。"
+        ),
+        "Reviewer": (
+            f"子任务C - 评审集成：根据「{task}」和PM拆解「{planner_reply}」指出风险、"
+            "无人值守运行注意事项、最终交付建议。不要写完整实现代码。"
+        ),
+    }
+
+
 def request_role(role_key, task, shared_history, config, offline, fix_round=0):
     role = config["roles"][role_key]
     client = None if offline else build_client(config)
@@ -393,6 +430,7 @@ def request_role(role_key, task, shared_history, config, offline, fix_round=0):
         "cost": cost,
         "duration": duration,
         "fix_round": fix_round,
+        "assigned_task": task,
     }
 
 
@@ -400,7 +438,10 @@ def render_role_result(result, shared_history, log_artifact, label=None):
     role_key = result["role_key"]
     display_name = label or result["name"]
     subtitle = f"| {result['model']} | {result['duration']:.1f}s | Tokens {result['tokens']} | ¥{result['cost']:.4f}"
-    render_message(display_name, result["reply"], result["border"], subtitle)
+    body = result["reply"]
+    if result.get("assigned_task") and result["role_key"] != "Planner":
+        body = f"[分配子任务]\n{result['assigned_task']}\n\n[执行结果]\n{result['reply']}"
+    render_message(display_name, body, result["border"], subtitle)
     shared_history.append({"role": "assistant", "content": f"[{role_key}] {result['reply']}"})
     append_log(
         log_artifact,
@@ -561,7 +602,7 @@ def run_role(role_key, task, shared_history, config, client, offline, log_artifa
 def run_team_chat(task, force_offline=False, no_run=False):
     config = load_config()
     offline = not api_ready(config, force_offline)
-    mode = "Offline Parallel" if offline else "Parallel"
+    mode = "Offline Split+Parallel" if offline else "Split+Parallel"
     client = None if offline else build_client(config)
 
     shared_history = [{"role": "user", "content": f"[老板提示] {task}"}]
@@ -589,13 +630,17 @@ def run_team_chat(task, force_offline=False, no_run=False):
     print_banner(task, mode)
     render_message("老板 (用户输入)", f"任务: {task}", "bright_blue")
 
-    role_keys = ["Planner", "Coder", "Tester"]
-    print_parallel_launch(role_keys, config)
+    planner_result = request_role("Planner", task, list(shared_history), config, offline)
+    render_role_result(planner_result, shared_history, log_artifact)
+    assignments = build_subtask_assignments(task, planner_result["reply"])
+    worker_keys = list(assignments.keys())
+    print_task_assignments(assignments, config)
+
     initial_history = list(shared_history)
-    with ThreadPoolExecutor(max_workers=len(role_keys)) as executor:
+    with ThreadPoolExecutor(max_workers=len(worker_keys)) as executor:
         futures = {
-            executor.submit(request_role, role_key, task, initial_history, config, offline): role_key
-            for role_key in role_keys
+            executor.submit(request_role, role_key, assignments[role_key], initial_history, config, offline): role_key
+            for role_key in worker_keys
         }
         coder_done = False
         for future in as_completed(futures):
