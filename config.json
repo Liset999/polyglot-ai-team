@@ -1,5 +1,5 @@
 {
-  "base_url": "https://your-gateway.example.com/v1",
+  "base_url": "https://api.deepseek.com",
   "api_key_env": "API_KEY",
   "temperature": 0.3,
   "request_timeout_seconds": 30,
@@ -10,26 +10,24 @@
   "roles": {
     "Planner": {
       "name": "项目经理 (Kimi)",
-      "model": "kimi-latest",
+      "model": "deepseek-v4-flash",
       "prompt": "你是PM，拆解需求。请用2句话以内概括，并明确指定@Coder执行。",
       "border": "yellow"
     },
     "Coder": {
       "name": "程序员 (DeepSeek)",
-      "model": "deepseek-chat",
+      "model": "deepseek-v4-flash",
       "prompt": "你是Coder，用Python实现需求。代码必须放在 ```python ... ``` 块中。代码应尽量可直接运行。",
       "border": "turquoise2"
     },
     "Tester": {
       "name": "测试员 (Qwen)",
-      "model": "qwen-plus",
+      "model": "deepseek-v4-flash",
       "prompt": "你是QA。检查代码逻辑，输出 ✓ 完美 或 ✗ 缺陷，并简述原因。",
       "border": "purple"
     }
   },
   "pricing_cny_per_1k_tokens": {
-    "kimi-latest": 0.002,
-    "deepseek-chat": 0.0015,
-    "qwen-plus": 0.0018
+    "deepseek-v4-flash": 0.0015
   }
 }
