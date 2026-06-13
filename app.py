@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -43,7 +44,7 @@ DEFAULT_CONFIG = {
         "Planner": {
             "name": "项目经理 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是PM，拆解需求。请用2句话以内概括，并明确指定@Coder执行。",
+            "prompt": "你是PM，与Coder和Tester并行开工。请用2句话以内拆解目标、定义交付物和验收标准。",
             "border": "yellow",
         },
         "Coder": {
@@ -55,7 +56,7 @@ DEFAULT_CONFIG = {
         "Tester": {
             "name": "测试员 (DeepSeek)",
             "model": "deepseek-v4-flash",
-            "prompt": "你是QA。检查代码逻辑，输出 ✓ 完美 或 ✗ 缺陷，并简述原因。",
+            "prompt": "你是QA，与Coder并行开工。不要等待代码，先基于需求列出关键测试点、边界条件和验收口径。",
             "border": "purple",
         },
     },
@@ -210,6 +211,13 @@ def fake_typing(label, delay):
         time.sleep(min(0.7, delay * 80))
 
 
+def print_parallel_launch(role_keys, config):
+    console.print("\n[bold cyan]⇢ 并行开工：角色同时领取任务...[/]")
+    for role_key in role_keys:
+        role = config["roles"][role_key]
+        console.print(f"[dim]● {role['name']} 已启动[/]")
+
+
 def offline_reply(role_key, task, shared_history, fix_round):
     if role_key == "Planner":
         content = (
@@ -228,8 +236,8 @@ def offline_reply(role_key, task, shared_history, fix_round):
         return content, estimate_tokens(content)
 
     content = (
-        "✓ 完美：构件具备直接运行入口，系统沙箱已经反馈运行结果；"
-        "若接入真实模型，可继续让 Coder 根据 stderr 进行最多 2 轮自动修复。"
+        "并行测试清单：1) 身高或体重为 0/负数时应拒绝；2) BMI 分段边界 18.5、24、28 要覆盖；"
+        "3) 非数字输入不能崩溃；4) 程序应有可直接运行入口，便于系统沙箱验证。"
     )
     return content, estimate_tokens(content)
 
@@ -368,6 +376,44 @@ def append_log(log_artifact, role_key, name, model, content, tokens, cost, durat
     log_artifact["messages"].append(item)
 
 
+def request_role(role_key, task, shared_history, config, offline, fix_round=0):
+    role = config["roles"][role_key]
+    client = None if offline else build_client(config)
+    start = time.perf_counter()
+    reply, tokens = ask_ai(role_key, task, shared_history, config, client, offline, fix_round)
+    duration = time.perf_counter() - start
+    cost = role_cost(config, role["model"], tokens)
+    return {
+        "role_key": role_key,
+        "name": role["name"],
+        "model": role["model"],
+        "border": role.get("border", "cyan"),
+        "reply": reply,
+        "tokens": tokens,
+        "cost": cost,
+        "duration": duration,
+        "fix_round": fix_round,
+    }
+
+
+def render_role_result(result, shared_history, log_artifact, label=None):
+    role_key = result["role_key"]
+    display_name = label or result["name"]
+    subtitle = f"| {result['model']} | {result['duration']:.1f}s | Tokens {result['tokens']} | ¥{result['cost']:.4f}"
+    render_message(display_name, result["reply"], result["border"], subtitle)
+    shared_history.append({"role": "assistant", "content": f"[{role_key}] {result['reply']}"})
+    append_log(
+        log_artifact,
+        role_key,
+        display_name,
+        result["model"],
+        result["reply"],
+        result["tokens"],
+        result["cost"],
+        result["duration"],
+    )
+
+
 def run_coder_once(task, shared_history, config, client, offline, log_artifact, fix_round=0):
     role_key = "Coder"
     role = config["roles"][role_key]
@@ -384,6 +430,65 @@ def run_coder_once(task, shared_history, config, client, offline, log_artifact, 
     shared_history.append({"role": "assistant", "content": f"[{role_key}] {reply}"})
     append_log(log_artifact, role_key, label, role["model"], reply, tokens, cost, duration)
 
+    code = extract_python_code(reply)
+    if "🔴 [集群链路故障]" in reply:
+        return False, "API_FAILURE"
+    if not code:
+        feedback = "[系统反馈] Coder 未输出 Python Markdown 代码块，无法生成构件。"
+        shared_history.append({"role": "user", "content": feedback})
+        return False, feedback
+
+    artifact_path = save_code_artifact(code)
+    console.print(Syntax(code, "python", theme="monokai", line_numbers=False))
+
+    result = run_python_artifact(config.get("runtime_timeout_seconds", 5))
+    if result["ok"]:
+        body = (
+            f"✓ Runtime 成功 | returncode={result['returncode']} | {result['duration_seconds']}s\n"
+            f"stdout:\n{result['stdout'] or '[无输出]'}"
+        )
+        border = "green"
+    else:
+        body = (
+            f"✗ Runtime 失败 | returncode={result['returncode']} | {result['duration_seconds']}s\n"
+            f"stdout:\n{result['stdout'] or '[无输出]'}\n\nstderr:\n{result['stderr'] or '[无错误输出]'}"
+        )
+        border = "red"
+
+    render_message("系统沙箱 (Harness 运行时)", body, border, f"| {artifact_path.as_posix()}")
+    append_log(
+        log_artifact,
+        "Harness",
+        "系统沙箱",
+        "subprocess.run",
+        body,
+        0,
+        0.0,
+        result["duration_seconds"],
+        extra={
+            "artifact": artifact_path.as_posix(),
+            "runtime_ok": result["ok"],
+            "stdout": result["stdout"],
+            "stderr": result["stderr"],
+            "returncode": result["returncode"],
+        },
+    )
+
+    if not result["ok"]:
+        feedback = (
+            "[系统反馈] 运行失败，请修复后重新输出完整 Python 代码块。\n"
+            f"returncode={result['returncode']}\nstdout={result['stdout']}\nstderr={result['stderr']}"
+        )
+        shared_history.append({"role": "user", "content": feedback})
+        return False, feedback
+
+    return True, body
+
+
+def process_coder_result(result, task, shared_history, config, client, offline, log_artifact):
+    render_role_result(result, shared_history, log_artifact)
+
+    reply = result["reply"]
     code = extract_python_code(reply)
     if "🔴 [集群链路故障]" in reply:
         return False, "API_FAILURE"
@@ -456,7 +561,7 @@ def run_role(role_key, task, shared_history, config, client, offline, log_artifa
 def run_team_chat(task, force_offline=False, no_run=False):
     config = load_config()
     offline = not api_ready(config, force_offline)
-    mode = "Offline Mock" if offline else "Pipeline"
+    mode = "Offline Parallel" if offline else "Parallel"
     client = None if offline else build_client(config)
 
     shared_history = [{"role": "user", "content": f"[老板提示] {task}"}]
@@ -484,27 +589,41 @@ def run_team_chat(task, force_offline=False, no_run=False):
     print_banner(task, mode)
     render_message("老板 (用户输入)", f"任务: {task}", "bright_blue")
 
-    run_role("Planner", task, shared_history, config, client, offline, log_artifact)
+    role_keys = ["Planner", "Coder", "Tester"]
+    print_parallel_launch(role_keys, config)
+    initial_history = list(shared_history)
+    with ThreadPoolExecutor(max_workers=len(role_keys)) as executor:
+        futures = {
+            executor.submit(request_role, role_key, task, initial_history, config, offline): role_key
+            for role_key in role_keys
+        }
+        coder_done = False
+        for future in as_completed(futures):
+            result = future.result()
+            if result["role_key"] == "Coder":
+                coder_done = True
+                if no_run:
+                    render_role_result(result, shared_history, log_artifact)
+                else:
+                    ok, _ = process_coder_result(result, task, shared_history, config, client, offline, log_artifact)
+                    max_fix_rounds = int(config.get("max_fix_rounds", 2))
+                    fix_round = 1
+                    while not ok and _ != "API_FAILURE" and fix_round <= max_fix_rounds:
+                        ok, _ = run_coder_once(
+                            task,
+                            shared_history,
+                            config,
+                            client,
+                            offline,
+                            log_artifact,
+                            fix_round=fix_round,
+                        )
+                        fix_round += 1
+                continue
+            render_role_result(result, shared_history, log_artifact)
 
-    if no_run:
-        run_role("Coder", task, shared_history, config, client, offline, log_artifact)
-    else:
-        ok, _ = run_coder_once(task, shared_history, config, client, offline, log_artifact)
-        max_fix_rounds = int(config.get("max_fix_rounds", 2))
-        fix_round = 1
-        while not ok and _ != "API_FAILURE" and fix_round <= max_fix_rounds:
-            ok, _ = run_coder_once(
-                task,
-                shared_history,
-                config,
-                client,
-                offline,
-                log_artifact,
-                fix_round=fix_round,
-            )
-            fix_round += 1
-
-    run_role("Tester", task, shared_history, config, client, offline, log_artifact)
+    if not coder_done:
+        raise RuntimeError("Coder did not return a result")
 
     total_tokens = sum(item.get("tokens", 0) for item in log_artifact["messages"])
     total_cost = sum(item.get("cost_cny", 0.0) for item in log_artifact["messages"])

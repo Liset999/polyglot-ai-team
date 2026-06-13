@@ -11,7 +11,7 @@
     "Planner": {
       "name": "项目经理 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是PM，拆解需求。请用2句话以内概括，并明确指定@Coder执行。",
+      "prompt": "你是PM，与Coder和Tester并行开工。请用2句话以内拆解目标、定义交付物和验收标准。",
       "border": "yellow"
     },
     "Coder": {
@@ -23,7 +23,7 @@
     "Tester": {
       "name": "测试员 (DeepSeek)",
       "model": "deepseek-v4-flash",
-      "prompt": "你是QA。检查代码逻辑，输出 ✓ 完美 或 ✗ 缺陷，并简述原因。",
+      "prompt": "你是QA，与Coder并行开工。不要等待代码，先基于需求列出关键测试点、边界条件和验收口径。",
       "border": "purple"
     }
   },
