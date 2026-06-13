@@ -8,6 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 from openai import OpenAI
 from rich.console import Console
 from rich.panel import Panel
@@ -98,10 +99,12 @@ def api_ready(config, forced_offline):
 def build_client(config):
     api_key = get_api_key(config)
     base_url = os.getenv("BASE_URL") or os.getenv("OPENAI_BASE_URL") or config.get("base_url")
+    timeout = config.get("request_timeout_seconds", 30)
     return OpenAI(
         api_key=api_key,
         base_url=base_url,
-        timeout=config.get("request_timeout_seconds", 30),
+        timeout=timeout,
+        http_client=httpx.Client(timeout=timeout, trust_env=False),
     )
 
 
