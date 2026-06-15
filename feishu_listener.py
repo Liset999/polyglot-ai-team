@@ -69,7 +69,7 @@ def extract_text(payload):
     return ""
 
 
-def make_handler(workspace_dir, session_id, webhook_url, dry_run):
+def make_handler(workspace_dir, session_id, webhook_url, dry_run, token="", allow_unlock=False):
     class FeishuHandler(BaseHTTPRequestHandler):
         server_version = "PolyglotFeishuListener/0.1"
 
@@ -85,9 +85,23 @@ def make_handler(workspace_dir, session_id, webhook_url, dry_run):
             print("[feishu-listener] " + (fmt % args))
 
         def do_GET(self):
-            self._send_json(200, {"ok": True, "service": "polyglot-feishu-listener", "session": session_id})
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "service": "polyglot-feishu-listener",
+                    "session": session_id,
+                    "auth": "token-required" if token else "disabled",
+                },
+            )
 
         def do_POST(self):
+            if token:
+                provided = self.headers.get("X-Polyglot-Token", "")
+                if provided != token:
+                    self._send_json(403, {"ok": False, "error": "invalid or missing X-Polyglot-Token"})
+                    return
+
             try:
                 length = int(self.headers.get("Content-Length", "0"))
                 raw = self.rfile.read(length).decode("utf-8", errors="replace")
@@ -103,6 +117,11 @@ def make_handler(workspace_dir, session_id, webhook_url, dry_run):
             text = extract_text(payload)
             if not text:
                 self._send_json(200, {"ok": True, "ignored": "no text found"})
+                return
+
+            lowered = text.strip().lower()
+            if not allow_unlock and (lowered == "/unlock" or lowered.startswith("/unlock ") or lowered == "unlock" or lowered.startswith("unlock ")):
+                self._send_json(403, {"ok": False, "error": "remote unlock disabled", "text": text})
                 return
 
             runtime = Runtime(workspace_dir, session_id)
@@ -121,13 +140,19 @@ def main(argv=None):
     parser.add_argument("--port", type=int, default=int(os.environ.get("POLYGLOT_FEISHU_PORT", "8787")))
     parser.add_argument("--session", default=os.environ.get("POLYGLOT_SESSION", "default"))
     parser.add_argument("--webhook-url", default=os.environ.get("FEISHU_WEBHOOK_URL", ""))
+    parser.add_argument("--token", default=os.environ.get("POLYGLOT_HTTP_TOKEN", ""))
+    parser.add_argument("--allow-unlock", action="store_true", help="allow remote /unlock commands")
     parser.add_argument("--dry-run", action="store_true", help="print outgoing Feishu payloads instead of posting")
     args = parser.parse_args(argv)
 
     workspace_dir = find_workspace_dir()
-    handler = make_handler(workspace_dir, args.session, args.webhook_url, args.dry_run)
+    handler = make_handler(workspace_dir, args.session, args.webhook_url, args.dry_run, args.token, args.allow_unlock)
     server = ThreadingHTTPServer((args.host, args.port), handler)
     print(f"[feishu-listener] listening on http://{args.host}:{args.port} session={args.session}")
+    if args.token:
+        print("[feishu-listener] token auth enabled: require X-Polyglot-Token")
+    else:
+        print("[feishu-listener] WARNING: token auth disabled")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
