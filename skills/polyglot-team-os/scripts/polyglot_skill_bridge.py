@@ -4,11 +4,12 @@
 
 import argparse
 import os
+from pathlib import Path
 import shlex
 import sys
 
 
-DEFAULT_WORKSPACE = r"D:\Repository\polyglot-ai-team"
+LOCAL_WINDOWS_EXAMPLE = r"D:\Repository\polyglot-ai-team"
 
 
 def configure_stdio():
@@ -24,8 +25,36 @@ def configure_stdio():
                     pass
 
 
+def looks_like_workspace(path):
+    return os.path.isdir(os.path.join(path, "polyglot_ai"))
+
+
+def find_workspace(configured=None):
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    if os.environ.get("POLYGLOT_WORKSPACE"):
+        candidates.append(os.environ["POLYGLOT_WORKSPACE"])
+    candidates.append(os.getcwd())
+
+    script_path = Path(__file__).resolve()
+    candidates.extend(str(parent) for parent in script_path.parents)
+    candidates.append(LOCAL_WINDOWS_EXAMPLE)
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = os.path.abspath(candidate)
+        if looks_like_workspace(path):
+            return path
+
+    raise RuntimeError(
+        "Could not find Polyglot workspace. Pass --workspace <path> or set POLYGLOT_WORKSPACE."
+    )
+
+
 def load_main_agent(workspace, session_id):
-    workspace = os.path.abspath(workspace or os.environ.get("POLYGLOT_WORKSPACE") or DEFAULT_WORKSPACE)
+    workspace = find_workspace(workspace)
     if workspace not in sys.path:
         sys.path.insert(0, workspace)
     from polyglot_ai.main_agent import MainAgent
@@ -96,6 +125,8 @@ def handle_text(text, session_id="default", workspace=None):
         return agent.history_text()
     if lowered in ("/sessions", "sessions"):
         return agent.sessions_text()
+    if lowered in ("/events", "events"):
+        return agent.events_text()
 
     return agent.chat_reply(text, channel="skill")
 
@@ -103,7 +134,7 @@ def handle_text(text, session_id="default", workspace=None):
 def main(argv=None):
     configure_stdio()
     parser = argparse.ArgumentParser(description="Polyglot Team OS skill bridge")
-    parser.add_argument("--workspace", default=os.environ.get("POLYGLOT_WORKSPACE", DEFAULT_WORKSPACE))
+    parser.add_argument("--workspace", default=os.environ.get("POLYGLOT_WORKSPACE", ""))
     parser.add_argument("--session", default=os.environ.get("POLYGLOT_SESSION", "default"))
     parser.add_argument("--text", required=True)
     args = parser.parse_args(argv)

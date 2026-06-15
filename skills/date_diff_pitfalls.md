@@ -1,30 +1,14 @@
-# 技能：日期计算常见陷阱 (date_diff_pitfalls)
+# date_diff_pitfalls
 
-## 适用场景
-当任务涉及日期差计算、日期格式转换时，Worker 在写代码或修复 Bug 之前必须阅读本文件。
+- Trigger: a task asks for date difference, date conversion, or date validation.
+- Symptom: tests fail on reversed date order, alternate separators, or invalid calendar dates.
+- Fix strategy: parse dates with explicit accepted formats, validate by constructing `datetime.date(year, month, day)`, and return `abs((d1 - d2).days)` for date differences.
+- Avoid: returning signed day differences unless the test explicitly asks for direction; silently returning `None` for unsupported formats; hand-validating month lengths instead of using `datetime.date`.
 
-## 核心避坑规则
+Accepted default formats for simple converters:
 
-### 规则 1：日期差必须取绝对值
-**错误写法（会导致负天数断言失败）：**
-```python
-return (d1 - d2).days
-```
+- `YYYY-MM-DD`
+- `YYYY/MM/DD`
+- `YYYY.MM.DD`
 
-**正确写法：**
-```python
-return abs((d1 - d2).days)
-```
-
-**原因：** 测试用例通常会同时测试两个方向的日期差（例如 date_diff("2026-06-10", "2026-06-15") 和 date_diff("2026-06-15", "2026-06-10")），期望两者都返回正整数 5。不加 abs() 时，后者会返回 -5，导致断言失败。
-
-### 规则 2：支持多种日期格式
-`format_iso` 函数通常需要支持以下三种格式：
-- `YYYY-MM-DD`（标准 ISO 格式，不变直接返回）
-- `YYYY/MM/DD`（斜线分隔，需转换）
-- `YYYY.MM.DD`（点分隔，需转换）
-
-遇到不支持的格式应抛出 `ValueError`，不能静默返回 None。
-
-### 规则 3：日期合法性校验
-解析完日期各字段后，需用 `datetime.date(year, month, day)` 构造一次，让它抛出 ValueError 来验证日期合法性（例如 2026-02-30 是非法日期）。
+Unsupported or invalid dates should raise `ValueError`.

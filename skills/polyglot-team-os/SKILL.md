@@ -1,88 +1,51 @@
 ---
 name: polyglot-team-os
-description: Route chat, coding goals, status checks, steering instructions, and handoff requests into the user's local Polyglot AI Team OS runtime. Use when the user wants to invoke Polyglot, connect Hermes, Lobster, Feishu, or IM messages to Polyglot, delegate work to local Claude/Codex/OpenCode workers, inspect Polyglot sessions, or continue a Polyglot main-agent conversation.
+description: Route chat, coding goals, status checks, steering instructions, approval commands, and handoff requests into a local Polyglot AI Team OS runtime. Use when connecting Hermes, Lobster, Feishu, Codex, or another host to Polyglot; when a user asks to delegate work to local Claude/Codex/OpenCode workers through Polyglot; or when a host needs to inspect or continue a Polyglot session.
 ---
 
 # Polyglot Team OS
 
-## Quick Use
+## Purpose
 
-Use the local project at `D:\Repository\polyglot-ai-team` as the runtime root unless the user provides another path.
+Use this as a host integration skill. It is not the project README and not a runtime pitfall note.
 
-For direct command-line use, run:
+This skill receives user text from a host, routes it into Polyglot's `MainAgent`, and returns a plain text reply that the host can send back to the user.
+
+## Runtime Contract
+
+The host must provide or discover the Polyglot workspace by one of these methods:
+
+1. Pass `--workspace <path>` to `scripts/polyglot_skill_bridge.py`.
+2. Set `POLYGLOT_WORKSPACE`.
+3. Run the bridge from a directory that contains `polyglot_ai/`.
+
+Use a stable session id per host/chat with `--session` or `POLYGLOT_SESSION`.
+
+## Minimal Commands
 
 ```powershell
-python C:\Users\ROG\.codex\skills\polyglot-team-os\scripts\polyglot_skill_bridge.py --text "/status"
-```
-
-For a coding task:
-
-```powershell
-python C:\Users\ROG\.codex\skills\polyglot-team-os\scripts\polyglot_skill_bridge.py --session work --text "/run build a date converter with tests"
-```
-
-For lightweight chat, do not call a worker:
-
-```powershell
-python C:\Users\ROG\.codex\skills\polyglot-team-os\scripts\polyglot_skill_bridge.py --text "hello"
+python scripts/polyglot_skill_bridge.py --workspace <polyglot_repo> --session hermes --text "/status"
+python scripts/polyglot_skill_bridge.py --workspace <polyglot_repo> --session hermes --text "/run build a date converter with tests"
+python scripts/polyglot_skill_bridge.py --workspace <polyglot_repo> --session hermes --text "hello"
 ```
 
 ## Message Routing
 
-Route user text through `scripts/polyglot_skill_bridge.py` when the user wants Polyglot behavior from another host such as Hermes, Lobster, Feishu, WeChat, or a custom CLI.
-
-Supported messages:
-
 - `/run <goal>`: plan, delegate to the selected local worker, verify, and report.
 - `/status`: show plan, run state, lock, steer, control, and approval.
-- `/board`: show structured task board.
+- `/board`: show the structured task board.
 - `/timeline`: show recent action/observation flow.
-- `/packet`: show latest worker packet.
-- `/report`: show latest final report.
+- `/packet`: show the latest worker packet.
+- `/report`: show the latest final report.
 - `/handoff`: write and return a compact continuation handoff.
 - `/steer <text>`: steer an active run.
 - `/pause [text]`, `/resume [text]`, `/stop [text]`: control an active run.
-- `/approval`, `/approve`, `/deny [reason]`: handle high-trust worker approvals.
-- `/lock`, `/unlock [reason]`: inspect or clear stale run locks.
-- Any other text: route to `MainAgent.chat_reply` without calling a worker.
+- `/approval`, `/approve`, `/deny [reason]`: handle approval gates.
+- `/lock`, `/unlock [reason]`: inspect or clear local run locks. Only expose `/unlock` to trusted operators.
+- Any other text: call `MainAgent.chat_reply` without invoking a worker.
 
-## Embedding In Hermes Or Lobster
+## References
 
-Prefer importing the bridge instead of shelling out when the host is Python:
+Read `references/host-integration.md` when wiring this skill into Hermes, Lobster, Feishu, or a custom host.
 
-```python
-from pathlib import Path
-import sys
-
-skill_scripts = Path(r"C:\Users\ROG\.codex\skills\polyglot-team-os\scripts")
-sys.path.insert(0, str(skill_scripts))
-
-from polyglot_skill_bridge import handle_text
-
-def on_message(text: str) -> str:
-    return handle_text(text, session_id="hermes")
-```
-
-If the host is not Python, call the script as a subprocess and use stdout as the reply.
-
-## Safety Defaults
-
-Keep normal chat inside the main agent. Only `/run` should delegate intentionally.
-
-Use a stable session id per host or chat:
-
-- `hermes` for Hermes global room.
-- `lobster` for Lobster global room.
-- `feishu-<group-id>` for Feishu groups.
-
-If a run crashes and future `/run` calls return `[BUSY]`, inspect `/lock` first and only use `/unlock` when the process is stale.
-
-## Runtime Assumptions
-
-The bridge expects:
-
-- `D:\Repository\polyglot-ai-team\polyglot_ai\runtime.py`
-- `D:\Repository\polyglot-ai-team\polyglot_ai\main_agent.py`
-- Python available on PATH.
-
-If the runtime lives somewhere else, pass `--workspace <path>` or set `POLYGLOT_WORKSPACE`.
+Read `references/runtime-capabilities.md` when checking which Polyglot commands and state files are expected.
