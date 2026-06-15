@@ -1,0 +1,23 @@
+{
+  "default": "Claude Code",
+  "agents": [
+    {
+      "name": "Claude Code",
+      "command": "claude",
+      "adapter": "claude",
+      "enabled": true
+    },
+    {
+      "name": "My Local CLI",
+      "command": "D:\\Tools\\my-agent\\my-agent.cmd",
+      "adapter": "generic",
+      "enabled": false
+    },
+    {
+      "name": "OpenClaw Gateway",
+      "command": "openclaw",
+      "adapter": "openclaw",
+      "enabled": false
+    }
+  ]
+}

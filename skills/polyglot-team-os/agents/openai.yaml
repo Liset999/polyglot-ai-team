@@ -1,0 +1,4 @@
+interface:
+  display_name: "Polyglot Team OS"
+  short_description: "Bridge messages into Polyglot runtime."
+  default_prompt: "Use Polyglot Team OS to route this message through the local main agent."
