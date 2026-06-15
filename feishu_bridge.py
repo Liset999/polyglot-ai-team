@@ -70,77 +70,81 @@ def post_feishu_text(text, webhook_url=None, dry_run=False):
         return False
 
 
-def handle_text(main_agent, text, dry_run=False, webhook_url=None):
+def dispatch_text(main_agent, text):
     text = text.strip()
     if not text:
-        return post_feishu_text("Empty message ignored.", webhook_url=webhook_url, dry_run=dry_run)
+        return "Empty message ignored."
     lowered = text.lower()
     if lowered.startswith("/steer "):
         message = text[len("/steer "):].strip()
-        return post_feishu_text(main_agent.send_steer(message), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.send_steer(message)
     for action in ("pause", "resume", "stop"):
         prefix = f"/{action}"
         if lowered == prefix or lowered.startswith(prefix + " "):
             message = text[len(prefix):].strip()
-            return post_feishu_text(main_agent.set_control_text(action, message), webhook_url=webhook_url, dry_run=dry_run)
+            return main_agent.set_control_text(action, message)
     if lowered in ("/approval", "approval"):
-        return post_feishu_text(main_agent.approval_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.approval_text()
     if lowered in ("/approve", "approve"):
-        return post_feishu_text(main_agent.approve_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.approve_text()
     if lowered == "/deny" or lowered.startswith("/deny ") or lowered == "deny" or lowered.startswith("deny "):
         if lowered.startswith("/deny"):
             reason = text[len("/deny"):].strip()
         else:
             reason = text[len("deny"):].strip()
-        return post_feishu_text(main_agent.deny_text(reason), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.deny_text(reason)
     if lowered in ("/lock", "lock"):
-        return post_feishu_text(main_agent.lock_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.lock_text()
     if lowered == "/unlock" or lowered.startswith("/unlock ") or lowered == "unlock" or lowered.startswith("unlock "):
         if lowered.startswith("/unlock"):
             reason = text[len("/unlock"):].strip()
         else:
             reason = text[len("unlock"):].strip()
-        return post_feishu_text(main_agent.unlock_text(reason or "feishu unlock"), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.unlock_text(reason or "feishu unlock")
     if lowered in ("/status", "/board"):
-        return post_feishu_text(main_agent.compact_board_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.compact_board_text()
     if lowered in ("/board-full", "/status-full"):
-        return post_feishu_text(main_agent.board_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.board_text()
     if lowered in ("/report", "report"):
-        return post_feishu_text(main_agent.read_final_report(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.read_final_report()
     if lowered in ("/packet", "packet"):
-        return post_feishu_text(main_agent.latest_packet_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.latest_packet_text()
     if lowered in ("/timeline", "timeline"):
-        return post_feishu_text(main_agent.timeline_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.timeline_text()
     if lowered in ("/handoff", "handoff"):
-        return post_feishu_text(main_agent.handoff_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.handoff_text()
     if lowered in ("/history", "history"):
-        return post_feishu_text(main_agent.history_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.history_text()
     if lowered in ("/sessions", "sessions"):
-        return post_feishu_text(main_agent.sessions_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.sessions_text()
+    if lowered in ("/events", "events"):
+        return main_agent.events_text()
+    if lowered in ("/agents", "agents"):
+        return main_agent.agents_text()
     if lowered in ("/about", "about"):
-        return post_feishu_text(main_agent.about_text(), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.about_text()
     if lowered.startswith("/route "):
         goal = text[len("/route "):].strip()
-        return post_feishu_text(main_agent.route_text(goal), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.route_text(goal)
     if lowered.startswith("/session-new "):
         raw = text[len("/session-new "):].strip()
         parts = raw.split(maxsplit=1)
         if not parts:
-            return post_feishu_text("Usage: /session-new <id> [title]", webhook_url=webhook_url, dry_run=dry_run)
+            return "Usage: /session-new <id> [title]"
         title = parts[1] if len(parts) > 1 else ""
-        return post_feishu_text(main_agent.create_session_text(parts[0], title), webhook_url=webhook_url, dry_run=dry_run)
+        return main_agent.create_session_text(parts[0], title)
     if lowered.startswith("/run "):
         goal = text[len("/run "):].strip()
         exit_code, report = main_agent.run_goal(goal)
         if exit_code == 2:
-            return post_feishu_text(report, webhook_url=webhook_url, dry_run=dry_run)
-        return post_feishu_text(
-            f"Run finished with exit code {exit_code}\n\n{report}\n\n{main_agent.board_text()}",
-            webhook_url=webhook_url,
-            dry_run=dry_run,
-        )
+            return report
+        return f"Run finished with exit code {exit_code}\n\n{report}\n\n{main_agent.board_text()}"
 
-    return post_feishu_text(main_agent.chat_reply(text, channel="feishu"), webhook_url=webhook_url, dry_run=dry_run)
+    return main_agent.chat_reply(text, channel="feishu")
+
+
+def handle_text(main_agent, text, dry_run=False, webhook_url=None):
+    return post_feishu_text(dispatch_text(main_agent, text), webhook_url=webhook_url, dry_run=dry_run)
 
 
 def main(argv=None):

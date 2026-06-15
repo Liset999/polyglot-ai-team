@@ -13,7 +13,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from feishu_bridge import handle_text
+from feishu_bridge import dispatch_text, post_feishu_text
 from polyglot_ai.main_agent import MainAgent
 from polyglot_ai.runtime import Runtime
 
@@ -127,8 +127,9 @@ def make_handler(workspace_dir, session_id, webhook_url, dry_run, token="", allo
             runtime = Runtime(workspace_dir, session_id)
             main_agent = MainAgent(workspace_dir, runtime)
             runtime.append_event("feishu.incoming", text, {"source": "http-listener"})
-            ok = handle_text(main_agent, text, dry_run=dry_run, webhook_url=webhook_url)
-            self._send_json(200, {"ok": bool(ok), "text": text, "session": session_id})
+            reply = dispatch_text(main_agent, text)
+            ok = post_feishu_text(reply, dry_run=dry_run, webhook_url=webhook_url) if (dry_run or webhook_url) else True
+            self._send_json(200, {"ok": bool(ok), "text": text, "session": session_id, "reply": reply})
 
     return FeishuHandler
 
