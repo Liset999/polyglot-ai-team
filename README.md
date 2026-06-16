@@ -317,7 +317,16 @@ skills/polyglot-team-os/         Installable skill bridge.
 
 ## Architecture Notes
 
-The current design follows the project blueprint in `ai-team-os-v2-merged.pdf` and the extracted notes in `pdf_content_v2.txt`.
+The current development direction is anchored by the latest planning PDFs:
+
+```text
+polyglot-ai-team-dev-plan-v5.pdf
+polyglot-ai-team-dev-plan-v5.txt
+polyglot-main-agent-no-extra-llm-styled.pdf
+polyglot-main-agent-no-extra-llm-styled.txt
+```
+
+The older `ai-team-os-v2-merged.pdf` and `pdf_content_v2.txt` remain as historical blueprint material.
 
 See:
 
