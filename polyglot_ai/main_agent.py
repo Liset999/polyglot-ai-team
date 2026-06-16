@@ -59,6 +59,7 @@ class MainAgent:
         roles = ["meta_planner", "runtime_orchestrator", "coder", "test_runner"]
         if complexity == "medium":
             roles.append("reviewer")
+        workspace_snapshot = self.runtime.workspace_snapshot(max_recent_files=6)
 
         return {
             "goal": goal,
@@ -69,6 +70,14 @@ class MainAgent:
             "selected_agent": selected,
             "routing": self.route_decision(goal, env),
             "available_agents": agents,
+            "workspace_context": {
+                "repo_kind": workspace_snapshot.get("repo_kind_guess", ""),
+                "session_id": workspace_snapshot.get("session_id", ""),
+                "session_dir": workspace_snapshot.get("session_dir", ""),
+                "key_files": workspace_snapshot.get("important_files", []),
+                "key_dirs": workspace_snapshot.get("important_dirs", []),
+                "top_level": workspace_snapshot.get("top_level_entries", [])[:12],
+            },
             "issue_graph": [
                 {"id": "plan", "title": "Generate testable task scaffold", "depends_on": []},
                 {"id": "implement", "title": "Delegate implementation to local CLI worker", "depends_on": ["plan"]},
@@ -207,6 +216,12 @@ class MainAgent:
         lines.append(f"  mode:       {plan['execution_mode']}")
         lines.append(f"  agent:      {plan['selected_agent']}")
         lines.append(f"  roles:      {', '.join(plan['roles_needed'])}")
+        workspace = plan.get("workspace_context") or {}
+        if workspace:
+            lines.append(f"  workspace:  {workspace.get('repo_kind', '')} ({workspace.get('session_id', '')})")
+            key_files = workspace.get("key_files") or []
+            if key_files:
+                lines.append(f"  key files:  {', '.join(key_files[:4])}")
         lines.append("  graph:      plan -> implement -> verify -> report")
         lines.append(f"  next:       {plan['next_action']}")
         return "\n".join(lines)
@@ -393,6 +408,9 @@ class MainAgent:
 
     def board_text(self):
         return render_task_board(build_task_board(self.runtime))
+
+    def workspace_text(self):
+        return self.runtime.workspace_summary_text()
 
     def compact_board_text(self):
         return render_compact_task_board(build_task_board(self.runtime))
@@ -781,6 +799,13 @@ class MainAgent:
         self.runtime.append_event("main_agent.message", message, {"channel": "main"})
         if text in ("hello", "hi", "hey"):
             reply = "Hello. I am the main agent. Ask normally, or use /run <goal> when you want a local worker to execute."
+            self.runtime.append_message("assistant", reply, channel=channel)
+            return reply
+        if any(word in text for word in (
+            "workspace", "repo", "repository", "directory", "current dir",
+            "project structure", "what files", "where should i look",
+        )):
+            reply = self.workspace_text()
             self.runtime.append_message("assistant", reply, channel=channel)
             return reply
         if any(word in text for word in ("brief", "where are we", "当前", "现在", "session")):

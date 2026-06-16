@@ -99,6 +99,9 @@ class Runtime:
         except OSError:
             return ""
 
+    def _relpath(self, path):
+        return os.path.relpath(path, self.workspace_dir).replace("\\", "/")
+
     def now(self):
         return datetime.now().isoformat()
 
@@ -279,6 +282,143 @@ class Runtime:
         if self.session_id != "default":
             return None
         return self.read_json(os.path.join(self.artifacts_dir, "run_state.json"))
+
+    def workspace_snapshot(self, max_recent_files=12):
+        ignore_dirs = {
+            ".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+            "node_modules", ".claude", ".codex",
+        }
+        top_level_entries = []
+        important_file_candidates = [
+            "README.md",
+            "polyglot_cli.py",
+            "monitor.py",
+            "status.py",
+            "steer.py",
+            "feishu_bridge.py",
+            "feishu_listener.py",
+            "start_feishu.ps1",
+            "polyglot_ai/main_agent.py",
+            "polyglot_ai/runtime.py",
+            "polyglot_ai/v1_worker.py",
+            "polyglot_ai/worker_adapters.py",
+            "polyglot_ai/agents.py",
+            "skills/README.md",
+            "skills/polyglot-team-os/SKILL.md",
+        ]
+        important_dir_candidates = [
+            "polyglot_ai",
+            "skills",
+            "docs",
+            "scratch",
+            "artifacts",
+        ]
+        extension_counts = {}
+        recent_files = []
+
+        try:
+            names = sorted(os.listdir(self.workspace_dir), key=lambda item: item.lower())
+        except OSError:
+            names = []
+
+        for name in names:
+            if name in ignore_dirs:
+                continue
+            path = os.path.join(self.workspace_dir, name)
+            label = f"{name}/" if os.path.isdir(path) else name
+            top_level_entries.append(label)
+
+        for root, dirs, files in os.walk(self.workspace_dir):
+            dirs[:] = [
+                dirname for dirname in dirs
+                if dirname not in ignore_dirs and not dirname.startswith(".")
+            ]
+            rel_root = self._relpath(root)
+            if rel_root == "artifacts" or rel_root.startswith("artifacts/"):
+                dirs[:] = []
+                continue
+            for filename in files:
+                if filename.endswith((".pyc", ".pyo")):
+                    continue
+                path = os.path.join(root, filename)
+                ext = os.path.splitext(filename)[1].lower() or "[none]"
+                extension_counts[ext] = extension_counts.get(ext, 0) + 1
+                try:
+                    recent_files.append((os.path.getmtime(path), self._relpath(path)))
+                except OSError:
+                    pass
+
+        recent_files = [
+            rel for _mtime, rel in sorted(recent_files, reverse=True)[:max_recent_files]
+        ]
+        important_files = [
+            rel for rel in important_file_candidates
+            if os.path.exists(os.path.join(self.workspace_dir, rel.replace("/", os.sep)))
+        ]
+        important_dirs = [
+            f"{rel}/" for rel in important_dir_candidates
+            if os.path.isdir(os.path.join(self.workspace_dir, rel.replace("/", os.sep)))
+        ]
+        repo_kind = self._guess_repo_kind(important_files, important_dirs, extension_counts)
+        state = self.read_run_state() or {}
+
+        return {
+            "workspace_dir": self.workspace_dir,
+            "session_id": self.session_id,
+            "session_dir": self.session_dir,
+            "artifact_dir": self.snapshot_dir,
+            "top_level_entries": top_level_entries,
+            "important_files": important_files,
+            "important_dirs": important_dirs,
+            "recent_files": recent_files,
+            "language_counts": extension_counts,
+            "repo_kind_guess": repo_kind,
+            "run_status": state.get("status", "idle") if not state.get("_error") else "unknown",
+        }
+
+    def _guess_repo_kind(self, important_files, important_dirs, extension_counts):
+        if "polyglot_cli.py" in important_files and "polyglot_ai/" in important_dirs:
+            return "python terminal-first AI team runtime"
+        if ".py" in extension_counts:
+            return "python project"
+        if "package.json" in important_files:
+            return "javascript or typescript project"
+        return "local workspace"
+
+    def workspace_summary_text(self):
+        snapshot = self.workspace_snapshot()
+
+        def join_items(items, limit=8):
+            if not items:
+                return "none"
+            shown = items[:limit]
+            suffix = "" if len(items) <= limit else f", +{len(items) - limit} more"
+            return ", ".join(shown) + suffix
+
+        language_counts = snapshot.get("language_counts", {})
+        top_languages = sorted(language_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+        language_text = ", ".join(f"{ext}:{count}" for ext, count in top_languages) if top_languages else "none"
+
+        lines = ["Workspace Summary"]
+        lines.append(f"  root:       {snapshot.get('workspace_dir', '')}")
+        lines.append(f"  session:    {snapshot.get('session_id', '')}")
+        lines.append(f"  session dir:{snapshot.get('session_dir', '')}")
+        lines.append(f"  repo kind:  {snapshot.get('repo_kind_guess', '')}")
+        lines.append(f"  run status: {snapshot.get('run_status', 'idle')}")
+        lines.append(f"  top level:  {join_items(snapshot.get('top_level_entries', []), 12)}")
+        lines.append(f"  key files:  {join_items(snapshot.get('important_files', []), 10)}")
+        lines.append(f"  key dirs:   {join_items(snapshot.get('important_dirs', []), 8)}")
+        lines.append(f"  languages:  {language_text}")
+        recent = snapshot.get("recent_files", [])
+        if recent:
+            lines.append(f"  recent:     {join_items(recent, 8)}")
+        lines.append("")
+        lines.append("Suggested entrypoints:")
+        lines.append("  - CLI/main session: polyglot_cli.py")
+        lines.append("  - Main control layer: polyglot_ai/main_agent.py")
+        lines.append("  - Runtime state/session layer: polyglot_ai/runtime.py")
+        lines.append("  - Worker loop: polyglot_ai/v1_worker.py")
+        return "\n".join(lines)
 
     def send_steer(self, message):
         payload = {"message": message, "timestamp": self.now()}

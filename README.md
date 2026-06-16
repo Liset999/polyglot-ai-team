@@ -33,6 +33,7 @@ hello
 /route build a date converter
 /run build a date converter with unit tests
 /status
+/workspace
 /board
 /timeline
 /report
@@ -59,6 +60,7 @@ python .\polyglot_cli.py run FORCE_MOCK=1 "build a hello function with tests"
 /plan <goal>         Create the team plan without running a worker.
 /route <goal>        Explain which worker would be selected and why.
 /status             Show plan, run state, lock, steer, control, approval.
+/workspace          Show deterministic workspace summary.
 /board              Show the structured task board.
 /packet             Show the latest task packet sent to a worker.
 /timeline           Show recent action/observation events.

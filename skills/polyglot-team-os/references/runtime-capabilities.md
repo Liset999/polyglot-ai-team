@@ -4,6 +4,7 @@
 
 - `/run <goal>` delegates work to the selected worker.
 - `/status` and `/board` inspect current task state.
+- `/workspace` and `/repo` return deterministic workspace summaries.
 - `/timeline` shows action/observation flow.
 - `/packet` shows the latest worker task packet.
 - `/report` returns the latest final report.

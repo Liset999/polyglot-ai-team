@@ -48,7 +48,7 @@ runtime = Runtime(WORKSPACE_DIR, SESSION_ID)
 main_agent = MainAgent(WORKSPACE_DIR, runtime)
 KNOWN_COMMANDS = {
     "run", "plan", "steer", "status", "events", "cancel", "agents",
-    "board", "packet", "sessions", "session-new", "route", "pause", "resume", "stop",
+    "board", "workspace", "repo", "packet", "sessions", "session-new", "route", "pause", "resume", "stop",
     "chat", "history", "timeline", "handoff", "approval", "approve", "deny",
     "lock", "unlock", "about", "doctor", "help", "exit", "quit", "q",
 }
@@ -98,6 +98,10 @@ def show_events(limit=12):
 
 def show_board():
     print(main_agent.board_text())
+
+
+def show_workspace():
+    print(main_agent.workspace_text())
 
 
 def show_packet():
@@ -325,6 +329,7 @@ Commands:
   /resume [message]  Resume a paused worker
   /stop [message]    Stop the active worker at the next checkpoint
   /status            Show session state and pending steer
+  /workspace         Show deterministic workspace summary
   /board             Show structured task board with tasks and artifacts
   /packet            Show latest delegated task packet
   /timeline          Show recent action/observation flow
@@ -435,6 +440,8 @@ def repl():
             set_control(cmd, " ".join(words).strip())
         elif cmd == "status":
             show_status()
+        elif cmd in ("workspace", "repo"):
+            show_workspace()
         elif cmd == "board":
             show_board()
         elif cmd == "packet":
@@ -491,6 +498,8 @@ def build_parser():
         control_p.add_argument("message", nargs="*")
 
     sub.add_parser("status", help="show current state")
+    sub.add_parser("workspace", help="show deterministic workspace summary")
+    sub.add_parser("repo", help="show deterministic workspace summary")
     sub.add_parser("board", help="show structured task board")
     sub.add_parser("packet", help="show latest delegated task packet")
     sub.add_parser("timeline", help="show recent action/observation flow")
@@ -553,6 +562,9 @@ def main(argv=None):
         return 0
     if args.command == "status":
         show_status()
+        return 0
+    if args.command in ("workspace", "repo"):
+        show_workspace()
         return 0
     if args.command == "board":
         show_board()

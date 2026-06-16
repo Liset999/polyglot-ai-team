@@ -103,6 +103,8 @@ def dispatch_text(main_agent, text):
         return main_agent.unlock_text(reason or "feishu unlock")
     if lowered in ("/status", "/board"):
         return main_agent.compact_board_text()
+    if lowered in ("/workspace", "/repo", "workspace", "repo"):
+        return main_agent.workspace_text()
     if lowered in ("/board-full", "/status-full"):
         return main_agent.board_text()
     if lowered in ("/report", "report"):

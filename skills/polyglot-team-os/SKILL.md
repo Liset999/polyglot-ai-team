@@ -33,6 +33,7 @@ python scripts/polyglot_skill_bridge.py --workspace <polyglot_repo> --session he
 
 - `/run <goal>`: plan, delegate to the selected local worker, verify, and report.
 - `/status`: show plan, run state, lock, steer, control, and approval.
+- `/workspace` or `/repo`: show deterministic workspace summary.
 - `/board`: show the structured task board.
 - `/timeline`: show recent action/observation flow.
 - `/packet`: show the latest worker packet.

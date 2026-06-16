@@ -84,6 +84,8 @@ def handle_text(text, session_id="default", workspace=None):
         return f"[exit {code}]\n{reply}"
     if lowered in ("/status", "status"):
         return agent.status_text()
+    if lowered in ("/workspace", "workspace", "/repo", "repo"):
+        return agent.workspace_text()
     if lowered in ("/board", "board"):
         return agent.board_text()
     if lowered in ("/timeline", "timeline"):
