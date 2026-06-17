@@ -4,6 +4,8 @@ import re
 import shutil
 from datetime import datetime
 
+from polyglot_ai.redaction import redact_secrets, redact_value
+
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
@@ -15,6 +17,166 @@ def validate_session_id(session_id):
     if session_id in (".", ".."):
         raise ValueError("invalid session id")
     return session_id
+
+
+def normalize_team_plan(plan):
+    """Normalize team plan dict to Team Plan 2.0 schema.
+    Accepts ANY format (minimal test dicts, v0_planner format, main_agent format),
+    fills in missing fields with sensible defaults, returns consistent dict.
+    Never removes existing fields - only adds missing ones.
+    """
+    if plan is None:
+        plan = {}
+    elif not isinstance(plan, dict):
+        plan = {}
+
+    result = dict(plan)
+
+    # --- complexity_level mapping ---
+    raw_level = result.get("complexity_level")
+    if isinstance(raw_level, str) and raw_level:
+        level_lower = raw_level.lower()
+        if level_lower in ("tiny", "small"):
+            result["complexity_level"] = "simple"
+        elif level_lower in ("medium", "complex"):
+            result["complexity_level"] = level_lower
+        else:
+            result["complexity_level"] = "simple"
+    else:
+        tasks_list = result.get("tasks")
+        if isinstance(tasks_list, list) and len(tasks_list) > 5:
+            result["complexity_level"] = "complex"
+        elif isinstance(tasks_list, list) and len(tasks_list) >= 3:
+            result["complexity_level"] = "medium"
+        else:
+            result["complexity_level"] = "simple"
+
+    # --- estimated_complexity_score ---
+    if "estimated_complexity_score" not in result or result.get("estimated_complexity_score") is None:
+        level = result.get("complexity_level", "simple")
+        tasks_list = result.get("tasks")
+        if isinstance(tasks_list, list) and len(tasks_list) > 0 and level == "simple" and raw_level is None:
+            n = len(tasks_list)
+            if n <= 2:
+                score = 20
+            elif n <= 5:
+                score = 55
+            else:
+                score = 85
+        else:
+            if level == "complex":
+                score = 85
+            elif level == "medium":
+                score = 55
+            else:
+                score = 20
+        result["estimated_complexity_score"] = score
+
+    # --- estimated_score (added if absent) ---
+    if "estimated_score" not in result or result.get("estimated_score") is None:
+        result["estimated_score"] = result["estimated_complexity_score"]
+
+    # --- task_graph generation ---
+    if "task_graph" not in result or not isinstance(result.get("task_graph"), list):
+        task_graph = []
+        issue_graph = result.get("issue_graph")
+        tasks_list = result.get("tasks")
+        goal = result.get("goal", "")
+
+        if isinstance(issue_graph, list) and len(issue_graph) > 0:
+            for idx, item in enumerate(issue_graph):
+                if not isinstance(item, dict):
+                    continue
+                item_id = str(item.get("id") or f"task_{idx}")
+                depends_raw = item.get("depends_on") or []
+                depends_on = [str(d) for d in depends_raw] if isinstance(depends_raw, list) else []
+                description = str(item.get("title") or item.get("description") or f"Task {item_id}")
+                task_graph.append({
+                    "id": item_id,
+                    "phase": "fill",
+                    "description": description,
+                    "depends_on": depends_on,
+                    "status": "pending",
+                    "max_attempts": 3,
+                    "model_preference": "cheap",
+                })
+        elif isinstance(tasks_list, list) and len(tasks_list) > 0:
+            for idx, item in enumerate(tasks_list):
+                if not isinstance(item, dict):
+                    continue
+                filename = str(item.get("filename") or item.get("path") or f"file_{idx}")
+                description = str(item.get("description") or filename)
+                is_test = (
+                    "test" in filename.lower()
+                    or filename.lower().startswith("test_")
+                    or filename.lower().endswith("_test.py")
+                )
+                phase = "verify" if is_test else "fill"
+                item_id = f"{phase}_{idx}"
+                task_graph.append({
+                    "id": item_id,
+                    "phase": phase,
+                    "description": description,
+                    "depends_on": [],
+                    "status": "pending",
+                    "max_attempts": 3,
+                    "model_preference": "cheap",
+                })
+        elif isinstance(goal, str) and goal.strip():
+            task_graph.append({
+                "id": "fill_main",
+                "phase": "fill",
+                "description": "Implement goal",
+                "depends_on": [],
+                "status": "pending",
+                "max_attempts": 3,
+                "model_preference": "cheap",
+            })
+            task_graph.append({
+                "id": "verify_main",
+                "phase": "verify",
+                "description": "Verify implementation",
+                "depends_on": ["fill_main"],
+                "status": "pending",
+                "max_attempts": 3,
+                "model_preference": "cheap",
+            })
+
+        result["task_graph"] = task_graph
+
+    # --- roles_needed ---
+    if "roles_needed" not in result or not isinstance(result.get("roles_needed"), list) or len(result["roles_needed"]) == 0:
+        result["roles_needed"] = ["meta_planner", "runtime_orchestrator", "coder", "test_runner"]
+
+    # --- budget ---
+    if "budget" not in result or not isinstance(result.get("budget"), dict) or len(result["budget"]) == 0:
+        result["budget"] = {
+            "max_total_attempts": 3,
+            "preferred_cost_tier": "cheap",
+            "fallback_cost_tier": "cheap",
+        }
+
+    # --- approval_points ---
+    if "approval_points" not in result or not isinstance(result.get("approval_points"), list):
+        result["approval_points"] = []
+
+    # --- recommended_skills ---
+    if "recommended_skills" not in result or not isinstance(result.get("recommended_skills"), list):
+        result["recommended_skills"] = []
+
+    # --- next_action ---
+    if "next_action" not in result or not isinstance(result.get("next_action"), str) or not result["next_action"].strip():
+        result["next_action"] = "delegate to worker"
+
+    # --- team_plan_version ---
+    if "team_plan_version" not in result:
+        result["team_plan_version"] = "2.0"
+
+    # --- goal default ---
+    if "goal" not in result:
+        result["goal"] = ""
+
+    return result
 
 
 class Runtime:
@@ -116,6 +278,7 @@ class Runtime:
 
     def write_json(self, path, data):
         self.ensure()
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         tmp_path = f"{path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -127,8 +290,8 @@ class Runtime:
             "ts": self.now(),
             "session_id": self.session_id,
             "type": event_type,
-            "summary": summary,
-            "data": data or {},
+            "summary": redact_secrets(summary),
+            "data": redact_value(data or {}),
         }
         with open(self.events_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
@@ -136,9 +299,9 @@ class Runtime:
             self.append_timeline(
                 actor="runtime",
                 action=event_type,
-                observation=summary,
+                observation=event["summary"],
                 status=self._status_from_event_type(event_type),
-                data=data or {},
+                data=event["data"],
                 mirror_event=False,
             )
         return event
@@ -153,6 +316,21 @@ class Runtime:
             return "running"
         return "observed"
 
+    def log_profile_audit(self, task_id, profile_id, latency_sec, status, tokens=None):
+        self.ensure()
+        audit_path = os.path.join(self.session_dir, "profile_audit.jsonl")
+        record = {
+            "timestamp": self.now(),
+            "task_id": task_id,
+            "profile_id": profile_id,
+            "latency_sec": latency_sec,
+            "status": status,
+            "tokens": tokens,
+        }
+        with open(audit_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self.append_event("profile.audit", f"Profile audit: {profile_id} - {status} ({latency_sec:.2f}s)", record)
+
     def append_timeline(self, actor, action, observation="", status="observed", data=None, mirror_event=True):
         self.ensure()
         item = {
@@ -160,9 +338,9 @@ class Runtime:
             "session_id": self.session_id,
             "actor": actor,
             "action": action,
-            "observation": observation,
+            "observation": redact_secrets(observation),
             "status": status,
-            "data": data or {},
+            "data": redact_value(data or {}),
         }
         with open(self.timeline_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
@@ -218,7 +396,7 @@ class Runtime:
         if not os.path.exists(self.messages_path):
             return []
         messages = []
-        with open(self.messages_path, "r", encoding="utf-8") as f:
+        with open(self.messages_path, "r", encoding="utf-8", errors="replace") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -264,13 +442,17 @@ class Runtime:
         return packets[-limit:] if limit else packets
 
     def save_team_plan(self, plan):
-        self.write_json(self.team_plan_path, plan)
+        normalized = normalize_team_plan(plan)
+        self.write_json(self.team_plan_path, normalized)
         if self.session_id == "default":
-            self.write_json(os.path.join(self.artifacts_dir, "team_plan.json"), plan)
-        self.append_event("team_plan.created", f"Created team plan: {plan.get('task_name', '')}", plan)
+            self.write_json(os.path.join(self.artifacts_dir, "team_plan.json"), normalized)
+        self.append_event("team_plan.created", f"Created team plan: {normalized.get('task_name', '')}", normalized)
 
     def read_team_plan(self):
-        return self.read_json(self.team_plan_path)
+        raw = self.read_json(self.team_plan_path)
+        if raw is None:
+            return None
+        return normalize_team_plan(raw)
 
     def save_run_state(self, state):
         self.write_json(self.run_state_path, state)
@@ -282,6 +464,48 @@ class Runtime:
         if self.session_id != "default":
             return None
         return self.read_json(os.path.join(self.artifacts_dir, "run_state.json"))
+
+    def record_budget_downgrade(self, reason):
+        """Record a budget downgrade event in the session run state.
+        Appends reason string to 'budget_downgrade_events' list.
+        Returns the updated state dict.
+        """
+        state = self.read_run_state() or {}
+        if not isinstance(state, dict):
+            state = {}
+        events = state.get("budget_downgrade_events") or []
+        if not isinstance(events, list):
+            events = []
+        events.append(str(reason))
+        state["budget_downgrade_events"] = events
+        state["budget_exceeded"] = True
+        self.save_run_state(state)
+        return state
+
+    def read_budget_state(self):
+        """Read budget-relevant fields from run_state.
+        Returns dict with: attempts_used, max_total_attempts,
+        budget_exceeded, downgrade_events, model_tier.
+        """
+        state = self.read_run_state() or {}
+        if not isinstance(state, dict):
+            state = {}
+
+        max_attempts = 3
+        plan = self.read_team_plan() or {}
+        if isinstance(plan, dict):
+            budget = plan.get("budget") or {}
+            if isinstance(budget, dict):
+                max_attempts = budget.get("max_total_attempts") or 3
+
+        return {
+            "attempts_used": int(state.get("attempt") or 0),
+            "max_total_attempts": int(max_attempts),
+            "budget_exceeded": bool(state.get("budget_exceeded", False)),
+            "downgrade_events": list(state.get("budget_downgrade_events") or []),
+            "model_tier": str(state.get("model_tier") or (
+                plan.get("budget") or {}).get("preferred_cost_tier") or "cheap"),
+        }
 
     def workspace_snapshot(self, max_recent_files=12):
         ignore_dirs = {
@@ -466,6 +690,19 @@ class Runtime:
             return self.read_json(self.control_path)
         return self.read_json(self.control_path) or self.read_json(os.path.join(self.artifacts_dir, "control.json"))
 
+    def clear_control(self, reason=""):
+        removed = False
+        paths = [self.control_path]
+        if self.session_id == "default":
+            paths.append(os.path.join(self.artifacts_dir, "control.json"))
+        for path in paths:
+            if os.path.exists(path):
+                os.remove(path)
+                removed = True
+        if removed:
+            self.append_event("user.control_cleared", reason or "Cleared control signal")
+        return removed
+
     def request_approval(self, payload):
         data = dict(payload)
         data.setdefault("status", "pending")
@@ -481,6 +718,42 @@ class Runtime:
     def read_run_lock(self):
         return self.read_json(self.run_lock_path)
 
+    def process_is_alive(self, pid):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return False
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        if os.name == "nt":
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1000, False, pid)
+                if handle:
+                    kernel32.CloseHandle(handle)
+                    return True
+                return False
+            except Exception:
+                return True
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        except Exception:
+            return True
+
+    def run_lock_is_stale(self, lock):
+        if not lock or lock.get("_error"):
+            return False
+        pid = lock.get("pid")
+        return bool(pid) and not self.process_is_alive(pid)
+
     def acquire_run_lock(self, goal, owner="main_agent"):
         self.ensure()
         payload = {
@@ -493,7 +766,18 @@ class Runtime:
         try:
             fd = os.open(self.run_lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
-            return False, self.read_run_lock() or {"goal": "unknown", "owner": "unknown"}
+            existing = self.read_run_lock() or {"goal": "unknown", "owner": "unknown"}
+            if self.run_lock_is_stale(existing):
+                self.append_event("run_lock.stale", "Released stale run lock from dead process", existing)
+                self.release_run_lock("stale lock from dead process")
+                try:
+                    fd = os.open(self.run_lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+                except FileExistsError:
+                    return False, self.read_run_lock() or existing
+                except OSError as exc:
+                    return False, {"_error": str(exc)}
+            else:
+                return False, existing
         except OSError as exc:
             return False, {"_error": str(exc)}
 

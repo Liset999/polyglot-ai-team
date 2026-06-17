@@ -13,6 +13,7 @@ from polyglot_ai.worker_adapters import create_worker_adapter
 
 # 1. 核心路径定义
 WORKSPACE_DIR = os.path.abspath(os.environ.get("POLYGLOT_WORKSPACE") or os.path.dirname(os.path.dirname(__file__)))
+INSTALL_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 RUNTIME = Runtime(WORKSPACE_DIR, os.environ.get("POLYGLOT_SESSION", "default"))
 # 三层目录结构：inputs（规划层）/ draft（草稿层）/ release（交付层）
 INPUTS_DIR = os.path.abspath(RUNTIME.working_artifact_dir("inputs"))
@@ -39,6 +40,44 @@ _configure_stdio()
 
 AGENT_BACKEND = select_agent()
 WORKER_ADAPTER = create_worker_adapter(AGENT_BACKEND, WORKSPACE_DIR, DRAFT_DIR, CLAUDE_LOG_PATH, RUNTIME)
+
+# Skill compounding helpers — additive, cross-session skill index updates.
+def _finalize_skill_outcome(success):
+    """Update cross-session skill index with run outcome."""
+    try:
+        from polyglot_ai.skill_compound import update_skill_index
+        session_dir = RUNTIME.session_dir
+        parent_artifacts = os.path.dirname(os.path.abspath(session_dir))
+        update_skill_index(parent_artifacts, session_dir)
+    except Exception:
+        pass
+
+
+def _check_and_apply_budget(attempt):
+    """If attempt exceeds budget, record a downgrade event. Returns True if exceeded."""
+    try:
+        plan = RUNTIME.read_team_plan() or {}
+        if isinstance(plan, dict):
+            budget = plan.get("budget") or {}
+            if isinstance(budget, dict):
+                max_attempts = int(budget.get("max_total_attempts") or 3)
+            else:
+                max_attempts = 3
+        else:
+            max_attempts = 3
+        if attempt > max_attempts:
+            reason = f"attempt {attempt} exceeds budget max_total_attempts={max_attempts}"
+            state = RUNTIME.read_run_state() or {}
+            if isinstance(state, dict):
+                events = list(state.get("budget_downgrade_events") or [])
+                events.append(reason)
+                state["budget_downgrade_events"] = events
+                state["budget_exceeded"] = True
+                RUNTIME.save_run_state(state)
+            return True
+    except Exception:
+        pass
+    return False
 
 def update_run_state(goal, target_file, test_file, status, attempt=0, last_error_summary="", last_exit_code=0, failure_type="none"):
     state = {
@@ -82,7 +121,7 @@ def read_plan():
 
 def run_v0_worker():
     print("[v1-Worker] [INFO] 正在启动 v0_worker 执行测试...")
-    cmd = [sys.executable, os.path.join(WORKSPACE_DIR, "polyglot_ai", "v0_worker.py")]
+    cmd = [sys.executable, os.path.join(INSTALL_DIR, "polyglot_ai", "v0_worker.py")]
     try:
         process = subprocess.Popen(
             cmd,
@@ -120,6 +159,24 @@ def call_claude_cli(prompt):
 
 def query_claude_cli(prompt):
     return WORKER_ADAPTER.query(prompt)
+
+def cli_failure_type(exit_code, default="generation_failed"):
+    if exit_code == 130:
+        return "user_stopped"
+    if exit_code == -4:
+        return "worker_timeout"
+    if exit_code == -3:
+        return "profile_not_runnable"
+    if exit_code == -2:
+        return "subprocess_start_failed"
+    return default
+
+def process_exit_code(exit_code):
+    if exit_code == 0:
+        return 0
+    if exit_code == 130:
+        return 130
+    return 1
 
 def record_task_packet(goal, phase, path, test_file, prompt, desc="", attempt=0, error_summary="", steer_message=""):
     packet = build_task_packet(
@@ -193,6 +250,16 @@ def load_relevant_skills(context_text):
                 print(f"[v1-Worker] [SKILL] 已加载技能文件: {filename}")
             except Exception as e:
                 print(f"[WARNING] 无法读取技能文件 {filename}: {e}", file=sys.stderr)
+
+    # Skill compounding: record which skills were used (additive only)
+    try:
+        import re
+        names = re.findall(r'### \[([^\]]+\.md)\]', " ".join(relevant_skills))
+        for name in set(names):
+            from polyglot_ai.skill_compound import record_skill_usage
+            record_skill_usage(RUNTIME.session_dir, name, "context", "unknown")
+    except Exception:
+        pass
 
     if not relevant_skills:
         return ""
@@ -333,6 +400,14 @@ def main():
 
     if not impl_tasks:
         print("[v1-Worker] [INFO] 未找到需要填充的 Python 实现文件，直接运行测试。")
+        record_task_packet(
+            goal,
+            "verify",
+            target_file,
+            test_file,
+            "No implementation stub was found. Run verification against the current draft artifacts.",
+            desc="Verification-only task packet for an already-populated draft.",
+        )
         update_run_state(goal, target_file, test_file, "testing")
         honor_control_signal(goal, target_file, test_file, current_status="testing")
         exit_code = run_v0_worker()
@@ -358,6 +433,14 @@ def main():
         # 如果不是 Stub，说明可能已经由别处编写，或者有待自愈修复的 bug，跳过初始生成
         if os.path.exists(abs_path) and not is_stub_code(stub_code):
             print(f"[v1-Worker] [INFO] 检测到 {path} 已经包含实现代码（非空桩），跳过初始生成，直接进入测试和自愈阶段。")
+            record_task_packet(
+                goal,
+                "verify",
+                path,
+                test_file,
+                f"Existing implementation detected in '{path}'. Skip initial fill and verify it against '{test_file}'.",
+                desc=desc or "Existing implementation; verify before self-heal.",
+            )
             continue
             
         update_run_state(goal, path, test_file, "filling")
@@ -376,6 +459,7 @@ def main():
         )
         print(f"[v1-Worker] [INFO] Generating direct fill instruction for {path}...")
         direct_instruction = query_claude_cli(query_prompt)
+        honor_control_signal(goal, path, test_file, current_status="filling")
         
         clean_lines = []
         for line in direct_instruction.splitlines():
@@ -396,8 +480,8 @@ def main():
         exit_code = call_claude_cli(action_prompt)
         print(f"[v1-Worker] [INFO] Claude CLI completed with exit code: {exit_code}")
         if exit_code != 0:
-            update_run_state(goal, path, test_file, "failed", last_exit_code=exit_code, failure_type="generation_failed")
-            sys.exit(exit_code)
+            update_run_state(goal, path, test_file, "failed", last_exit_code=exit_code, failure_type=cli_failure_type(exit_code))
+            sys.exit(process_exit_code(exit_code))
         
     # 第二步：外部运行测试，评估健康度
     update_run_state(goal, target_file, test_file, "testing")
@@ -407,12 +491,15 @@ def main():
         print("[v1-Worker SUCCESS] 所有测试均已通过！无须开启自愈。")
         update_run_state(goal, target_file, test_file, "success", last_exit_code=0)
         _copy_to_release(impl_tasks)
+        _finalize_skill_outcome(True)
         sys.exit(0)
         
     # 第三步：外部控制的自愈修复循环
     max_attempts = 3
     attempt = 1
     while exit_code != 0 and attempt <= max_attempts:
+        # Budget check — record a downgrade event if this attempt exceeds the configured budget.
+        _check_and_apply_budget(attempt)
         print(f"\n[v1-Worker] [TRY] 开启第 {attempt}/{max_attempts} 次自愈尝试...")
         honor_control_signal(goal, target_file, test_file, current_status="healing", attempt=attempt)
         
@@ -471,6 +558,7 @@ def main():
             )
             print(f"[v1-Worker] [INFO] Analyzing failure and generating direct instruction for {path}...")
             direct_instruction = query_claude_cli(query_prompt)
+            honor_control_signal(goal, path, test_file, current_status="healing", attempt=attempt)
             
             clean_lines = []
             for line in direct_instruction.splitlines():
@@ -502,7 +590,7 @@ def main():
             cli_exit = call_claude_cli(action_prompt)
             print(f"[v1-Worker] [INFO] Claude CLI completed with exit code: {cli_exit}")
             if cli_exit != 0:
-                update_run_state(goal, path, test_file, "healing", attempt=attempt, last_error_summary=error_summary, last_exit_code=cli_exit, failure_type="cli_no_edit")
+                update_run_state(goal, path, test_file, "healing", attempt=attempt, last_error_summary=error_summary, last_exit_code=cli_exit, failure_type=cli_failure_type(cli_exit, "cli_no_edit"))
             
         # 重新在外部运行测试
         honor_control_signal(goal, target_file, test_file, current_status="testing", attempt=attempt)
@@ -511,12 +599,14 @@ def main():
             print(f"[v1-Worker SUCCESS] 自愈成功！在第 {attempt} 次尝试中测试全部通过。")
             update_run_state(goal, target_file, test_file, "success", attempt=attempt, last_exit_code=0)
             _copy_to_release(impl_tasks)
+            _finalize_skill_outcome(True)
             sys.exit(0)
             
         attempt += 1
         
     print(f"[v1-Worker FAILURE] 自愈失败。已达到最大尝试次数 {max_attempts}。测试仍然未通过。", file=sys.stderr)
     update_run_state(goal, target_file, test_file, "failed", attempt=max_attempts, last_error_summary=error_summary, last_exit_code=exit_code, failure_type="max_retries_reached")
+    _finalize_skill_outcome(False)
     sys.exit(1)
 
 if __name__ == "__main__":
